@@ -54,7 +54,7 @@ Standard formating :
 - command : Can be `INIT`, `RELEASE`, `WRITE` or `READ`
 - address
   - For `READ` and `WRITE` of `I2C`, `SPI` and `GPIO` : base 10 address
-  - For `WRITE` of `CORE` : can only be device_name (string)
+  - For `WRITE` of `CORE` : can only be `DEVICE_NAME`
 - data
   - For `I2C` and `SPI` : 
     - Base 10
@@ -65,7 +65,7 @@ Standard formating :
     - Base 2
     - One occurence
     - Only required for `WRITE`
-  - For `UART` : 
+  - For `UART` and `CORE` : 
     - String
     - One occurence
     - Only required for `WRITE`
