@@ -406,7 +406,16 @@ PROCESS_THREAD(main_process, ev, data)
 							COFFEE_WRITE(flash_buff, device_name_length + 1, 0);
 		            	}
 		            }
-		            
+
+		            // Read the device name
+		            if (bus == CORE && cmd == READ) {
+		            	if (strcmp(request->data, "DEVICE_NAME") == 0) {
+				        	sprintf(buff, "RELPY/%s", device_name);
+		        			PRINTF("Sending: '%s'\n", buff);
+							tcp_socket_send_str(socket, buff);
+						}
+		            }
+		            		            
 		            free_linked_list(request_p);            	
 	 			
 	 			// --- TCP event --- //
