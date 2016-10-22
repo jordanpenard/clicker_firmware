@@ -15,25 +15,42 @@
 #include "dev/flash.h"
 #include "cfs-coffee-arch.h"
 
+// --- Network stuff --- //
 
 #define SERVER_IP_ADDR "2001:1418:100::1"
-
 #define SERVER_PORT 3000
-#define CLIENT_PORT 3001
 
-#define UDP_BUFFER_SIZE 1024
+
+#define INPUTBUFSIZE 400
+static uint8_t inputbuf[INPUTBUFSIZE];
+
+#define OUTPUTBUFSIZE 400
+static uint8_t outputbuf[OUTPUTBUFSIZE];
+
+
+static tcp_socket_event_t last_tcp_event;
+static process_event_t tcp_event;
+static process_event_t tcp_data_received;
+
+// --- End network stuff --- //
 
 
 typedef enum {I2C, SPI, GPIO, UART, CORE} bus_type;
 typedef enum {INIT, RELEASE, WRITE, READ} cmd_type;
 
 
+/*---------------------------------------------------------------------------*/
+PROCESS(main_process, "Main process");
+AUTOSTART_PROCESSES(&main_process);
+
+/*---------------------------------------------------------------------------*/
 typedef struct linked_list { 
 	char* data;
 	struct linked_list * next; 
 } linked_list_t;
 
 
+/*---------------------------------------------------------------------------*/
 // e.g. in:  (a -> b -> 0) (c -> 0)
 //      out: a -> b -> c -> 0
 void add_at_the_end(linked_list_t *list, linked_list_t *new_item) {
@@ -46,6 +63,7 @@ void add_at_the_end(linked_list_t *list, linked_list_t *new_item) {
 	}		
 }
 
+/*---------------------------------------------------------------------------*/
 // Spliting a string into multiple strings
 // Split char is '/'
 // e.g. in:  "I2C/SEND/12/0"
@@ -98,6 +116,7 @@ linked_list_t * process_request(char* request) {
 	return list;
 }
 
+/*---------------------------------------------------------------------------*/
 void free_linked_list(linked_list_t * list) {
    linked_list_t *temp;
 
@@ -110,16 +129,66 @@ void free_linked_list(linked_list_t * list) {
 }
 
         
-PROCESS(main_process, "Main process");
-AUTOSTART_PROCESSES(&main_process);
+/*---------------------------------------------------------------------------*/
+static int callback_tcp_input(struct tcp_socket *s, void *ptr,
+      const uint8_t *inputptr, int inputdatalen) {
+    
+    printf("Received %d bytes : %s\n", inputdatalen, inputptr);
+	
+	char * buff = malloc(inputdatalen+1);
+	strcpy(buff, inputptr);
+	buff[inputdatalen] = '\0';
+	
+    process_post(&main_process, tcp_data_received, buff);
+
+    /* Discard everything */
+    return 0; /* all data consumed */
+}
+
+/*---------------------------------------------------------------------------*/
+static void callback_tcp_event(struct tcp_socket *s, void *ptr, tcp_socket_event_t ev) {
+	last_tcp_event = ev;
+	process_post(&main_process, tcp_event, NULL);
+}
+
+/*---------------------------------------------------------------------------*/
+struct tcp_socket * new_tcp_connection(const char * address, uint16_t port){
+    static struct tcp_socket conn;
+
+    if(address){
+        uip_ip6addr_t addr;
+        if(!uiplib_ipaddrconv(address, &addr))
+        {
+            printf("TCP: Failed to convert IP: %s\n", address);
+            return NULL;
+        }
+        
+ 		ipv6_add_default_route(address, 0);
+
+		tcp_socket_register(&conn, NULL,
+               inputbuf, sizeof(inputbuf),
+               outputbuf, sizeof(outputbuf),
+               callback_tcp_input,
+               callback_tcp_event);
+               		    
+        if (tcp_socket_connect(&conn, &addr, port) == 1)
+        	return &conn;
+        else
+        	return NULL;
+        	
+    } else {
+        printf("TCP: No IP provided\n");
+        return NULL;
+    }
+}
+
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(main_process, ev, data)
 {
     PROCESS_BEGIN();
-
-    static struct uip_udp_conn * socket;
-    static char udp_buffer[UDP_BUFFER_SIZE];
- 
+	
+	static struct tcp_socket * socket; 
+     
     static linked_list_t *request;
     static linked_list_t *request_p;
             
@@ -129,19 +198,23 @@ PROCESS_THREAD(main_process, ev, data)
     static char flash_buff[256];
     static uint8_t device_name_length;
     static char* device_name = NULL;
+    
+    static char buff[OUTPUTBUFSIZE];
 
-	// Clean the udp_buffer	 
-    memset(udp_buffer, '\0', UDP_BUFFER_SIZE); 
-          
+    tcp_event = process_alloc_event();
+    tcp_data_received = process_alloc_event();
+
+    
     leds_on(LED1);
-
+    leds_on(LED2);
+    
     // Init serial comm for debug
     pic32_uart3_init(9600, 0);
                     
     INIT_NETWORK_DEBUG();
     {
         PRINTF("===START===\n");
-        leds_on(LED2);
+        leds_off(LED2);
 
 	    // --- Read device name from the flash --- //
 	    
@@ -174,223 +247,253 @@ PROCESS_THREAD(main_process, ev, data)
 	    
 	    // --- End read device name from the flash --- //
               
-        ipv6_add_default_route(SERVER_IP_ADDR, 0);
 
-        PRINTF("Creating connection...\n");
-        socket = udp_new_connection(CLIENT_PORT, SERVER_PORT, SERVER_IP_ADDR);
-        PROCESS_WAIT_UDP_CONNECTED();
+        // --- TCP connection --- //
 
-        // --- UDP hand-check --- //
-
-        sprintf(udp_buffer, "Server/HELLO/%s", device_name);
-
-        PRINTF("Sending \"%s\"\n", udp_buffer);
-        udp_packet_send(socket, udp_buffer, strlen(udp_buffer));
-        PROCESS_WAIT_UDP_SENT();
-
-        static char* expected_reply;
-        expected_reply = malloc(strlen(device_name) + strlen("/HELLO"));
-        sprintf(expected_reply, "%s/HELLO", device_name);
-        
-        PRINTF("Wait for the server to reply \"%s\"\n", expected_reply);
-	    do {
-	      // Clean the udp_buffer	 
-          memset(udp_buffer, '\0', strlen(udp_buffer));   
-        	
-          PROCESS_WAIT_UDP_RECEIVED();
-	      udp_packet_receive(udp_buffer, sizeof(udp_buffer), NULL);
-	    } while(strcmp(udp_buffer, expected_reply) != 0);
-	    
-	    // --- End UDP hand-check --- //
-        
-        // Switch off the leds, ready for normal operations
-        leds_off(LED1);
-        leds_off(LED2);
-
-        while(1) {
-        	
-        	// Clean the udp_buffer	 
-        	memset(udp_buffer, '\0', strlen(udp_buffer));       
-	        
-	        PRINTF("WAIT_UDP_RECEIVED\n");
-	        PROCESS_WAIT_UDP_RECEIVED();
-	        udp_packet_receive(udp_buffer, sizeof(udp_buffer), NULL);
-	          	        	        
-	        PRINTF("Received: %s\n", udp_buffer);
-            
-            request = process_request(udp_buffer);
-            request_p = request;
-            
-            // --- Spec for 6lowpan messages --- //
-            //
-            //  The messages sent over 6lowpan are strings
-            //  separated by '/'.
-            //  This is passed to process_request() in 
-            //  order to split them into multiple strings.
-            //  We now have 'p' pointing on the first of
-            //  these strings.
-            //
-            // --- Spec for Server->Client messages --- //
-			//
-            //  Standard formating :
-            //    "device_name/bus/command/address/data/data"
-            //
-            //  device_name : This is suposed to be unique
-            //                "Server" and "All" are reserved
-            //  bus : Can be I2C, SPI, GPIO, UART or CORE
-            //  command : Can be INIT, RELEASE, WRITE or READ
-            //  address : Only for READ and WRITE of
-            //            I2C, SPI and GPIO, base 10
-            //            For CORE, can only be DEVICE_NAME
-            //  data : 
-            //    For I2C and SPI : 
-            //      - Base 10
-            //      - Only required for READ and WRITE
-            //      - For WRITE : Can be one or more occurence (burst)
-            //      - For READ : One occurence, number of byte to be read
-            //    For GPIO : 
-            //      - Base 2
-            //      - One occurence
-            //      - Only required for WRITE
-            //    For UART : 
-            //      - String
-            //      - One occurence
-            //      - Only required for WRITE
-            //
-            //  Comments :
-            //    - For CORE, command can only be WRITE, address can
-            //        only be DEVICE_NAME
-            //
-            //  To be clarified :
-            //    - UART READ : How is this suposed to work ?
-            //    - GPIO address : Format ?
-            //
-            //  Limitations : The max length of the UDP request is
-            //    defined by UDP_BUFFER_SIZE
-            //
-            //  Exceptions :
-            //    - At boot-up of a 6lowpan client, there is a
-            //        hand-check process to make sure the connection 
-            //        is up. The client send "Server/HELLO/device_name"
-            //        (with device_name being the device name). And
-            //        then the server reply "device_name/HELLO" 
-            //        which would be an invalid request if this wasn't
-            //        at boot-up.
-            //
-            // --- Spec for Client->Server messages --- //
-			//
-            //  Standard formating :
-            //    "device_name/command/data"
-            //
-            //  device_name : Should only be "Server" 
-            //  command : Can be HELLO or REPLY
-            //  data : 
-            //    For HELLO : Device name of the sender
-            //    For RELPY : tbd
-			//
-            // --- End spec for Client->Server messages --- //
-            
-            // If the message is for this device or for all devices
-            if (strcmp(request->data, device_name) == 0 
-                || strcmp(request->data, "All") == 0) {
-                	
-	            request = request->next;
-
-	            if (strcmp(request->data, "I2C") == 0)
-	            	bus = I2C;
-	            else if (strcmp(request->data, "SPI") == 0)
-	            	bus = SPI;
-	            else if (strcmp(request->data, "GPIO") == 0)
-	            	bus = GPIO;
-	            else if (strcmp(request->data, "UART") == 0)
-	            	bus = UART;
-	            else if (strcmp(request->data, "CORE") == 0)
-	            	bus = CORE;
-	            else
-	            	PRINTF("Error, %s unknown\n", request->data);
-	            
-	            request = request->next;
-	            
-	            if (strcmp(request->data, "INIT") == 0)
-	            	cmd = INIT;
-	            else if (strcmp(request->data, "RELEASE") == 0)
-	            	cmd = RELEASE;
-	            else if (strcmp(request->data, "WRITE") == 0)
-	            	cmd = WRITE;
-	            else if (strcmp(request->data, "READ") == 0)
-	            	cmd = READ;
-	            else
-	            	PRINTF("Error, %s unknown\n", request->data);
-	
-	            request = request->next;
-	            
-	            if (bus == I2C && cmd == INIT)
-	            	i2c_init();
-	
-	            if (bus == I2C && cmd == RELEASE)
-	            	i2c_release();
-				
-				// TODO: Extends to multi bytes
-	            if (bus == I2C && cmd == WRITE)
-	            	i2c_write_byte(atol(request->data), atoi(request->next->data));
-	
-				// TODO: Extends to multi bytes
-	            if (bus == I2C && cmd == READ) {
-	            	static char data_read = 0;
-	            	i2c_read_byte(atol(request->data), &data_read);
+		socket = new_tcp_connection(SERVER_IP_ADDR, SERVER_PORT);		
+		if (socket)
+			PRINTF("Connecting...\n\r");
+		else
+			PRINTF("Connection error\n\r");
 			
-			        sprintf(udp_buffer, "%d", data_read);
-	        		PRINTF("Sending data: %s\n", udp_buffer);
-	        		udp_packet_send(socket, udp_buffer, strlen(udp_buffer));
-			        PROCESS_WAIT_UDP_SENT();
-	            }
-	            
-	            if (bus == GPIO && cmd == WRITE) {
-	            	static char* port;
-	            	static int value;
+		PROCESS_WAIT_EVENT_UNTIL(ev == tcp_event);
+		
+        if (last_tcp_event == TCP_SOCKET_ABORTED)
+            PRINTF("Aborted\n");
+        if (last_tcp_event == TCP_SOCKET_TIMEDOUT)
+            PRINTF("Timeout\n");
+        if (last_tcp_event == TCP_SOCKET_CLOSED)
+            PRINTF("Closed\n");
+               
+        if(last_tcp_event == TCP_SOCKET_CONNECTED) {
+        	
+        	// --- TCP hand-check --- //
+        			
+			PRINTF("Connected\n\r");
+			
+			// Send Hello
+			sprintf(buff, "HELLO/%s", device_name);
+			PRINTF("Sending: '%s'\n\r", buff);
+			tcp_socket_send_str(socket, buff);
+			
+			// Wait for Hello to be sent back
+			PROCESS_WAIT_EVENT_UNTIL(ev == tcp_data_received);
+
+			static bool running;
+	
+			if (strcmp(data, "HELLO") == 0) {
+				running = true;
+				leds_off(LED1);
+			} else {
+				running = false;
+				PRINTF("Error, expected to receive 'HELLO' but got '%s'\n", data);	
+			}
+
+        	// --- End TCP hand-check --- //
+
+	        while(running) {
+	        	
+				PROCESS_YIELD();
+				
+				// --- TCP data received --- //
+				if(ev == tcp_data_received) {
+
+					static char * buff;
+					static int len;
+					len = strlen(data);
+					buff = malloc(len + 1);
+					memcpy(buff, data, len);
+					buff[len] = '\0';
+
+	            	free(data);
+
+					PRINTF("Received: '%s'\n\r", buff);
+					
+	            	request = process_request(buff);
+	            	request_p = request;
 	            	
-	            	port = request->data;
-	            	request = request->next;
-	            	value = atoi(request->data);            		
+	            	free(buff);
 	            	
-	            	if (strcmp(port, "LED1") == 0) {
-	            		if (value)
-	            			leds_on(LED1);
-						else
-							leds_off(LED1);
-	            	}
-	            	if (strcmp(port, "LED2") == 0) {
-	            		if (value)
-	            			leds_on(LED2);
-						else
-							leds_off(LED2);
-	            	}
-	            }
-	            
-	            // Change the device name
-	            if (bus == CORE && cmd == WRITE) {
-	            	if (strcmp(request->data, "DEVICE_NAME") == 0) {
-   			            request = request->next;
-						
-						// Free the old name
-						free(device_name);
-						
-						// Set the new device name
-						device_name_length = strlen(request->data);
-						device_name = malloc(device_name_length);
-						memcpy(device_name, request->data, device_name_length);
-						
-						// Prepare the values to be writen in the flash
-						flash_buff[0] = device_name_length;
-						memcpy(flash_buff+1, device_name, device_name_length);
-						
-						// Write device_name_length and device_name from offset 0
-						COFFEE_WRITE(flash_buff, device_name_length + 1, 0);	            		
-	            	}
-	            }
-	            
-	            free_linked_list(request_p);
-            }
+
+		            // --- Spec for 6lowpan messages --- //
+		            //
+		            //  The messages sent over 6lowpan are strings
+		            //  separated by '/'.
+		            //  This is passed to process_request() in 
+		            //  order to split them into multiple strings.
+		            //  We now have 'p' pointing on the first of
+		            //  these strings.
+		            //
+		            // --- Spec for Server->Client messages --- //
+					//
+		            //  Standard formating :
+		            //    "bus/command/address/data/data"
+		            //
+		            //  bus : Can be I2C, SPI, GPIO, UART or CORE
+		            //  command : Can be INIT, RELEASE, WRITE or READ
+		            //  address : Only for READ and WRITE of
+		            //            I2C, SPI and GPIO, base 10
+		            //            For CORE, can only be DEVICE_NAME
+		            //  data : 
+		            //    For I2C and SPI : 
+		            //      - Base 10
+		            //      - Only required for READ and WRITE
+		            //      - For WRITE : Can be one or more occurence (burst)
+		            //      - For READ : One occurence, number of byte to be read
+		            //    For GPIO : 
+		            //      - Base 2
+		            //      - One occurence
+		            //      - Only required for WRITE
+		            //    For UART : 
+		            //      - String
+		            //      - One occurence
+		            //      - Only required for WRITE
+		            //
+		            //  Comments :
+		            //    - For CORE, command can only be WRITE, address can
+		            //        only be DEVICE_NAME
+		            //
+		            //  To be clarified :
+		            //    - UART READ : How is this suposed to work ?
+		            //    - GPIO address : Format ?
+		            //
+		            //  Limitations : The max length of the TCP request is
+		            //    defined by INPUTBUFSIZE
+		            //
+		            //  Exceptions :
+		            //    - At boot-up of a 6lowpan client, there is a
+		            //        hand-check process to make sure the connection 
+		            //        is up. The client send "HELLO/device_name"
+		            //        (with device_name being the device name). And
+		            //        then the server reply "HELLO" 
+		            //        which would be an invalid request if this wasn't
+		            //        at boot-up.
+		            //
+		            // --- Spec for Client->Server messages --- //
+					//
+		            //  Standard formating :
+		            //    "command/data"
+		            //
+		            //  command : Can be HELLO or REPLY
+		            //  data : 
+		            //    For HELLO : Device name of the sender
+		            //    For RELPY : tbd
+					//
+		            // --- End spec for Client->Server messages --- //
+		            
+		                	
+		            if (strcmp(request->data, "I2C") == 0)
+		            	bus = I2C;
+		            else if (strcmp(request->data, "SPI") == 0)
+		            	bus = SPI;
+		            else if (strcmp(request->data, "GPIO") == 0)
+		            	bus = GPIO;
+		            else if (strcmp(request->data, "UART") == 0)
+		            	bus = UART;
+		            else if (strcmp(request->data, "CORE") == 0)
+		            	bus = CORE;
+		            else
+		            	PRINTF("Error, %s unknown\n", request->data);
+		            
+		            request = request->next;
+		            
+		            if (strcmp(request->data, "INIT") == 0)
+		            	cmd = INIT;
+		            else if (strcmp(request->data, "RELEASE") == 0)
+		            	cmd = RELEASE;
+		            else if (strcmp(request->data, "WRITE") == 0)
+		            	cmd = WRITE;
+		            else if (strcmp(request->data, "READ") == 0)
+		            	cmd = READ;
+		            else
+		            	PRINTF("Error, %s unknown\n", request->data);
+		
+		            request = request->next;
+		            
+		            if (bus == I2C && cmd == INIT)
+		            	i2c_init();
+		
+		            if (bus == I2C && cmd == RELEASE)
+		            	i2c_release();
+					
+					// TODO: Extends to multi bytes
+		            if (bus == I2C && cmd == WRITE)
+		            	i2c_write_byte(atol(request->data), atoi(request->next->data));
+		
+					// TODO: Extends to multi bytes
+		            if (bus == I2C && cmd == READ) {
+		            	static char data_read = 0;
+		            	i2c_read_byte(atol(request->data), &data_read);
+				
+				        sprintf(buff, "RELPY/%d", data_read);
+		        		PRINTF("Sending: '%s'\n", buff);
+						tcp_socket_send_str(socket, buff);
+		            }
+		            
+		            if (bus == GPIO && cmd == WRITE) {
+		            	static char* port;
+		            	static int value;
+		            	
+		            	port = request->data;
+		            	request = request->next;
+		            	value = atoi(request->data);            		
+		            	
+		            	if (strcmp(port, "LED1") == 0) {
+		            		if (value)
+		            			leds_on(LED1);
+							else
+								leds_off(LED1);
+		            	}
+		            	if (strcmp(port, "LED2") == 0) {
+		            		if (value)
+		            			leds_on(LED2);
+							else
+								leds_off(LED2);
+		            	}
+		            }
+		            
+		            // Change the device name
+		            if (bus == CORE && cmd == WRITE) {
+		            	if (strcmp(request->data, "DEVICE_NAME") == 0) {
+	   			            request = request->next;
+							
+							// Free the old name
+							free(device_name);
+							
+							// Set the new device name
+							device_name_length = strlen(request->data);
+							device_name = malloc(device_name_length);
+							memcpy(device_name, request->data, device_name_length);
+							
+							// Prepare the values to be writen in the flash
+							flash_buff[0] = device_name_length;
+							memcpy(flash_buff+1, device_name, device_name_length);
+							
+							// Write device_name_length and device_name from offset 0
+							COFFEE_WRITE(flash_buff, device_name_length + 1, 0);
+		            	}
+		            }
+		            
+		            free_linked_list(request_p);            	
+	 			
+	 			// --- TCP event --- //
+	 			} else if(ev == tcp_event) {
+
+			        if (last_tcp_event == TCP_SOCKET_ABORTED)
+			            PRINTF("Aborted\n");
+			        if (last_tcp_event == TCP_SOCKET_TIMEDOUT)
+			            PRINTF("Timeout\n");
+			        if (last_tcp_event == TCP_SOCKET_CLOSED)
+			            PRINTF("Closed\n");
+			        
+			        if (last_tcp_event == TCP_SOCKET_ABORTED 
+			            || last_tcp_event == TCP_SOCKET_TIMEDOUT
+			            || last_tcp_event == TCP_SOCKET_CLOSED) {
+					        PRINTF("Stopping\n");
+					        running = false;
+			        }
+	 			}
+	        }
         }
     }
 
