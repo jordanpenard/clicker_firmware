@@ -314,74 +314,7 @@ PROCESS_THREAD(main_process, ev, data)
 	            	
 	            	free(buff);
 	            	
-
-		            // --- Spec for 6lowpan messages --- //
-		            //
-		            //  The messages sent over 6lowpan are strings
-		            //  separated by '/'.
-		            //  This is passed to process_request() in 
-		            //  order to split them into multiple strings.
-		            //  We now have 'p' pointing on the first of
-		            //  these strings.
-		            //
-		            // --- Spec for Server->Client messages --- //
-					//
-		            //  Standard formating :
-		            //    "bus/command/address/data/data"
-		            //
-		            //  bus : Can be I2C, SPI, GPIO, UART or CORE
-		            //  command : Can be INIT, RELEASE, WRITE or READ
-		            //  address : Only for READ and WRITE of
-		            //            I2C, SPI and GPIO, base 10
-		            //            For CORE, can only be DEVICE_NAME
-		            //  data : 
-		            //    For I2C and SPI : 
-		            //      - Base 10
-		            //      - Only required for READ and WRITE
-		            //      - For WRITE : Can be one or more occurence (burst)
-		            //      - For READ : One occurence, number of byte to be read
-		            //    For GPIO : 
-		            //      - Base 2
-		            //      - One occurence
-		            //      - Only required for WRITE
-		            //    For UART : 
-		            //      - String
-		            //      - One occurence
-		            //      - Only required for WRITE
-		            //
-		            //  Comments :
-		            //    - For CORE, command can only be WRITE, address can
-		            //        only be DEVICE_NAME
-		            //
-		            //  To be clarified :
-		            //    - UART READ : How is this suposed to work ?
-		            //    - GPIO address : Format ?
-		            //
-		            //  Limitations : The max length of the TCP request is
-		            //    defined by INPUTBUFSIZE
-		            //
-		            //  Exceptions :
-		            //    - At boot-up of a 6lowpan client, there is a
-		            //        hand-check process to make sure the connection 
-		            //        is up. The client send "HELLO/device_name"
-		            //        (with device_name being the device name). And
-		            //        then the server reply "HELLO" 
-		            //        which would be an invalid request if this wasn't
-		            //        at boot-up.
-		            //
-		            // --- Spec for Client->Server messages --- //
-					//
-		            //  Standard formating :
-		            //    "command/data"
-		            //
-		            //  command : Can be HELLO or REPLY
-		            //  data : 
-		            //    For HELLO : Device name of the sender
-		            //    For RELPY : tbd
-					//
-		            // --- End spec for Client->Server messages --- //
-		            
-		                	
+        	
 		            if (strcmp(request->data, "I2C") == 0)
 		            	bus = I2C;
 		            else if (strcmp(request->data, "SPI") == 0)
