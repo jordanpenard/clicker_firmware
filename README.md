@@ -88,8 +88,9 @@ Exceptions :
 Standard formating :
   `command/data`
 
-- command : Can be `HELLO` or `REPLY`
+- command : Can be `HELLO`, `REPLY` or `EVENT`
 - data : 
   - For `HELLO` : Device name of the clicker
   - For `RELPY` : tbd
+  - For `EVENT` : tbd
 
